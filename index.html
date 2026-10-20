@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Leitor de Nota Fiscal</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<style>
+  :root{
+    --bg:#f4f6f8; --card:#fff; --text:#1c2430; --muted:#5d6b7a; --line:#dde3ea;
+    --accent:#0f766e; --accent-soft:#e6f4f2; --ok:#15803d; --warn:#b45309; --err:#b91c1c;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#0f141a; --card:#18202a; --text:#e6edf3; --muted:#9aa7b4; --line:#2a3542;
+      --accent:#2dd4bf; --accent-soft:#12302d; --ok:#4ade80; --warn:#fbbf24; --err:#f87171; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.5}
+  header{padding:28px 16px 8px;max-width:1100px;margin:0 auto}
+  h1{margin:0;font-size:1.6rem}
+  header p{margin:4px 0 0;color:var(--muted)}
+  main{max-width:1100px;margin:0 auto;padding:16px;display:grid;gap:16px;grid-template-columns:1fr}
+  @media(min-width:900px){main{grid-template-columns:380px 1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px}
+  h2{font-size:1.05rem;margin:0 0 12px}
+  #drop{border:2px dashed var(--line);border-radius:10px;padding:26px 14px;text-align:center;cursor:pointer;transition:.15s}
+  #drop.over,#drop:hover{border-color:var(--accent);background:var(--accent-soft)}
+  #drop strong{display:block;margin-bottom:4px}
+  #drop span{color:var(--muted);font-size:.9rem}
+  #preview{width:100%;max-height:420px;object-fit:contain;margin-top:12px;border-radius:8px;display:none;border:1px solid var(--line)}
+  .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+  button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--text);padding:9px 14px;border-radius:8px;cursor:pointer}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  @media (prefers-color-scheme: dark){button.primary{color:#062a26}}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  #status{margin-top:12px;font-size:.92rem;color:var(--muted);min-height:1.4em}
+  progress{width:100%;height:8px;margin-top:6px;display:none}
+  .grid{display:grid;gap:12px;grid-template-columns:1fr}
+  @media(min-width:600px){.grid{grid-template-columns:1fr 1fr}}
+  label{display:block;font-size:.8rem;color:var(--muted);margin-bottom:3px;font-weight:600;text-transform:uppercase;letter-spacing:.03em}
+  input,textarea{width:100%;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text)}
+  textarea{min-height:160px;font-family:ui-monospace,Consolas,monospace;font-size:.82rem}
+  .full{grid-column:1/-1}
+  .main input{border-color:var(--accent);font-weight:600;font-size:1.05rem}
+  .main label{color:var(--accent)}
+  .badge{display:inline-block;font-size:.75rem;padding:2px 8px;border-radius:99px;margin-left:6px;vertical-align:middle}
+  .b-ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+  .b-err{background:color-mix(in srgb,var(--err) 18%,transparent);color:var(--err)}
+  .b-warn{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+  table{width:100%;border-collapse:collapse;font-size:.88rem}
+  th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600}
+  .chave-parts{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:8px}
+  .chave-parts div{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px}
+  .chave-parts small{display:block;color:var(--muted);font-size:.72rem}
+  .tip{font-size:.85rem;color:var(--muted);margin-top:14px}
+  details summary{cursor:pointer;color:var(--muted);margin-top:12px}
+  .wide{grid-column:1/-1}
+  footer{text-align:center;color:var(--muted);font-size:.8rem;padding:20px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Leitor de Nota Fiscal</h1>
+  <p>Envie a foto de uma NF-e, NFS-e, NFC-e ou cupom fiscal e o site extrai os dados automaticamente.</p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>1. Imagem da nota</h2>
+    <div id="drop">
+      <strong>Clique ou arraste a imagem aqui</strong>
+      <span>JPG ou PNG · no celular dá para tirar a foto na hora</span>
+    </div>
+    <input type="file" id="file" accept="image/*" hidden>
+    <img id="preview" alt="Pré-visualização da nota">
+    <div class="btns">
+      <button class="primary" id="btnLer" disabled>Ler nota</button>
+      <button id="btnLimpar">Limpar</button>
+    </div>
+    <div id="status"></div>
+    <progress id="prog" max="100" value="0"></progress>
+    <p class="tip"><b>Dica:</b> foto reta, bem iluminada e sem sombra deixa a leitura bem mais precisa. Se a nota tiver QR Code, deixe ele visível, porque é a forma mais confiável de pegar a chave de acesso.</p>
+  </section>
+
+  <section class="card">
+    <h2>2. Dados extraídos <span id="fonte"></span></h2>
+    <p class="tip" style="margin-top:0">Confira os campos e corrija o que precisar antes de salvar.</p>
+    <div class="grid">
+      <div class="main"><label>Valor total (R$)</label><input id="f_total"></div>
+      <div class="main"><label>Número da nota</label><input id="f_numero"></div>
+      <div class="main full"><label>Tomador / destinatário (nome)</label><input id="f_tomador"></div>
+      <div class="main"><label>CPF/CNPJ do tomador</label><input id="f_dest"></div>
+      <div class="main"><label>Data de emissão</label><input id="f_data"></div>
+      <div class="full"><label>Emitente / prestador (razão social)</label><input id="f_emitente"></div>
+      <div><label>CNPJ do emitente</label><input id="f_cnpj"></div>
+      <div><label>Série</label><input id="f_serie"></div>
+      <div><label>Hora</label><input id="f_hora"></div>
+      <div><label>Tributos aprox. (R$)</label><input id="f_tributos"></div>
+      <div class="full"><label>Forma de pagamento</label><input id="f_pagto"></div>
+      <div class="full"><label>Chave de acesso (44 dígitos) <span id="dvBadge"></span></label><input id="f_chave"></div>
+    </div>
+    <div id="chaveBox"></div>
+    <div class="btns">
+      <button class="primary" id="btnSalvar">Salvar no histórico</button>
+      <button id="btnJson">Copiar JSON</button>
+    </div>
+    <details>
+      <summary>Ver texto lido pelo OCR</summary>
+      <textarea id="rawText" readonly></textarea>
+    </details>
+  </section>
+
+  <section class="card wide">
+    <h2>3. Histórico de notas</h2>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>Data</th><th>Nº</th><th>Tomador</th><th>Valor</th><th>Emitente</th><th>Chave</th><th></th></tr></thead>
+        <tbody id="hist"></tbody>
+      </table>
+    </div>
+    <div class="btns">
+      <button id="btnCsv">Baixar planilha (CSV)</button>
+      <button id="btnApagar">Apagar histórico</button>
+    </div>
+  </section>
+</main>
+<footer>A leitura é feita no seu próprio navegador. A imagem não é enviada para nenhum servidor.</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+let currentFile = null;
+
+const UF = {11:'RO',12:'AC',13:'AM',14:'RR',15:'PA',16:'AP',17:'TO',21:'MA',22:'PI',23:'CE',24:'RN',25:'PB',26:'PE',27:'AL',28:'SE',29:'BA',31:'MG',32:'ES',33:'RJ',35:'SP',41:'PR',42:'SC',43:'RS',50:'MS',51:'MT',52:'GO',53:'DF'};
+const MODELO = {'55':'NF-e','65':'NFC-e','57':'CT-e','59':'CF-e SAT','58':'MDF-e'};
+const FIELDS = ['emitente','cnpj','tomador','dest','numero','serie','data','hora','total','tributos','pagto','chave'];
+
+/* ---------- Upload ---------- */
+const drop = $('drop');
+drop.onclick = () => $('file').click();
+$('file').onchange = e => e.target.files[0] && loadFile(e.target.files[0]);
+['dragover','dragenter'].forEach(ev => drop.addEventListener(ev, e => {e.preventDefault(); drop.classList.add('over');}));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => {e.preventDefault(); drop.classList.remove('over');}));
+drop.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) loadFile(f); });
+document.addEventListener('paste', e => {
+  const item = [...(e.clipboardData?.items||[])].find(i => i.type.startsWith('image/'));
+  if (item) loadFile(item.getAsFile());
+});
+
+function loadFile(f){
+  if (!f.type.startsWith('image/')) { setStatus('Envie um arquivo de imagem (JPG ou PNG).', 'err'); return; }
+  currentFile = f;
+  $('preview').src = URL.createObjectURL(f);
+  $('preview').style.display = 'block';
+  $('btnLer').disabled = false;
+  setStatus('Imagem carregada. Clique em "Ler nota".');
+}
+
+function setStatus(msg, type){
+  $('status').textContent = msg;
+  $('status').style.color = type==='err' ? 'var(--err)' : type==='ok' ? 'var(--ok)' : 'var(--muted)';
+}
+
+/* ---------- Imagem -> canvas (com pré-processamento) ---------- */
+function loadImage(file){
+  return new Promise((res, rej) => { const img = new Image(); img.onload = () => res(img); img.onerror = rej; img.src = URL.createObjectURL(file); });
+}
+function toCanvas(img, maxSide, enhance){
+  let w = img.naturalWidth, h = img.naturalHeight;
+  const scale = Math.min(maxSide / Math.max(w, h), 2.5);
+  w = Math.round(w*scale); h = Math.round(h*scale);
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d', {willReadFrequently:true});
+  ctx.drawImage(img, 0, 0, w, h);
+  if (enhance){
+    const d = ctx.getImageData(0,0,w,h), p = d.data;
+    for (let i=0;i<p.length;i+=4){
+      let g = 0.299*p[i]+0.587*p[i+1]+0.114*p[i+2];
+      g = (g-128)*1.5+128;            // contraste
+      g = g<0?0:g>255?255:g;
+      p[i]=p[i+1]=p[i+2]=g;
+    }
+    ctx.putImageData(d,0,0);
+  }
+  return c;
+}
+
+/* ---------- Leitura ---------- */
+$('btnLer').onclick = async () => {
+  if (!currentFile) return;
+  $('btnLer').disabled = true;
+  $('prog').style.display = 'block'; $('prog').value = 0;
+  try {
+    const img = await loadImage(currentFile);
+
+    // 1) QR Code
+    setStatus('Procurando QR Code...');
+    let qrText = null;
+    for (const side of [1200, 2000, 800]){
+      const c = toCanvas(img, side, false);
+      const d = c.getContext('2d').getImageData(0,0,c.width,c.height);
+      const qr = jsQR(d.data, c.width, c.height, {inversionAttempts:'attemptBoth'});
+      if (qr && qr.data){ qrText = qr.data; break; }
+    }
+
+    // 2) OCR
+    setStatus('Lendo o texto da nota (a primeira vez demora um pouco)...');
+    const canvas = toCanvas(img, 2200, true);
+    const result = await Tesseract.recognize(canvas, 'por', {
+      logger: m => { if (m.status === 'recognizing text') { $('prog').value = Math.round(m.progress*100); setStatus('Lendo o texto da nota... ' + Math.round(m.progress*100) + '%'); } }
+    });
+    const text = result.data.text || '';
+    $('rawText').value = text + (qrText ? '\n\n--- QR Code ---\n' + qrText : '');
+
+    const dados = extrair(text, qrText);
+    preencher(dados);
+    $('fonte').innerHTML = qrText ? '<span class="badge b-ok">QR Code lido</span>' : '<span class="badge b-warn">só OCR</span>';
+    setStatus('Pronto! Confira os dados ao lado.', 'ok');
+  } catch (err){
+    console.error(err);
+    setStatus('Não consegui ler a imagem. Verifique sua conexão e tente outra foto.', 'err');
+  } finally {
+    $('btnLer').disabled = false;
+    $('prog').style.display = 'none';
+  }
+};
+
+/* ---------- Extração ---------- */
+const reMoney = /\d{1,3}(?:\.\d{3})*,\d{2}/g;
+const toNum = s => s ? parseFloat(s.replace(/\./g,'').replace(',','.')) : NaN;
+
+function extrair(text, qr){
+  const t = text.replace(/[|]/g,' ');
+  const lines = t.split('\n').map(l => l.trim()).filter(Boolean);
+  const up = t.toUpperCase();
+  const r = {};
+
+  // Chave de acesso: QR primeiro, depois OCR
+  let chave = null;
+  if (qr){ const m = qr.replace(/\D/g,' ').match(/\d{44}/); if (m) chave = m[0]; }
+  if (!chave){
+    // só aceita sequência de 44 dígitos cujo dígito verificador confere (evita "chaves" falsas)
+    const cands = [];
+    const re44 = /(?:\d[\s.]*){44}/g; let mm;
+    while ((mm = re44.exec(t))) { const d = mm[0].replace(/\D/g,''); for (let k=0;k+44<=d.length;k++) cands.push(d.substr(k,44)); re44.lastIndex = mm.index + 1; }
+    chave = cands.find(validaChave) || null;
+  }
+  r.chave = chave || '';
+
+  // CNPJ / CPF
+  const cnpjs = [...t.matchAll(/\d{2}[.,\s]?\d{3}[.,\s]?\d{3}\s?[\/\\l1I]\s?\d{4}[-–\s]?\d{2}/g)].map(m => fmtCNPJ(m[0].replace(/\D/g,'')));
+  const cnpjsOk = cnpjs.filter(c => c.replace(/\D/g,'').length === 14);
+  if (chave && validaChave(chave)) r.cnpj = fmtCNPJ(chave.substr(6,14));
+  else r.cnpj = cnpjsOk[0] || '';
+  // Tomador / destinatário: procura o bloco que começa com TOMADOR, DESTINATÁRIO ou CONSUMIDOR
+  r.tomador = ''; let destDoc = '';
+  const ti = lines.findIndex(l => /TOMADOR|DESTINAT[ÁA]RIO|CONSUMIDOR/i.test(l) && !/N[ÃA]O\s+IDENTIFICADO/i.test(l));
+  if (ti >= 0){
+    const bloco = lines.slice(ti, ti+8);
+    for (const l of bloco){
+      const nm = l.match(/(?:NOME|RAZ[ÃA]O\s+SOCIAL)[^:]*[:\-]\s*(.+)/i);
+      if (nm && !r.tomador) r.tomador = nm[1].replace(/\s*(CPF|CNPJ).*$/i,'').trim();
+      const doc = l.match(/\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}|\d{3}\.?\d{3}\.?\d{3}-?\d{2}/);
+      if (doc && !destDoc) destDoc = doc[0];
+    }
+    if (!r.tomador){
+      const nome = bloco.slice(1).find(l => /^[A-Za-zÀ-ú][A-Za-zÀ-ú\s.&-]{5,}$/.test(l) && !/CPF|CNPJ|ENDERE|MUNIC|INSCRI|E-?MAIL|TELEFONE/i.test(l));
+      if (nome) r.tomador = nome.trim();
+    }
+  }
+  const cpf = t.match(/\d{3}\.\d{3}\.\d{3}-\d{2}/);
+  const destCnpj = cnpjsOk.find(c => c !== r.cnpj);
+  r.dest = destDoc || (cpf ? cpf[0] : (destCnpj || ''));
+
+  // Emitente: linha com LTDA/S.A./ME/EIRELI ou a primeira linha "de letras"
+  const emp = lines.find(l => /\b(LTDA|S\.?\/?A\.?|EIRELI|\bME\b|\bEPP\b|COMERCIO|COMÉRCIO|SUPERMERCADO|MERCADO|FARMACIA|FARMÁCIA|POSTO|RESTAURANTE)\b/i.test(l) && !/CNPJ/i.test(l));
+  r.emitente = (emp || lines.find(l => /^[A-ZÀ-Ú\s.&-]{6,}$/.test(l) && !/DOCUMENTO|NOTA|CUPOM|DANFE|CONSUMIDOR|PREFEITURA|TOMADOR|PRESTADOR/i.test(l)) || '')
+    .replace(/^.*?(NOME|RAZ[ÃA]O\s+SOCIAL)[^:]*:\s*/i,'').trim();
+
+  // Número e série
+  const num = up.match(/(?:N[ÚU]MERO\s+DA\s+NFS-?E|N[º°O.]?\s*|NUMERO|NÚMERO|NFC-?E\s*N[º°O]?\.?|NF-?E\s*N[º°O]?\.?)\s*[:.]?\s*(\d{3}\.\d{3}\.\d{3}|\d{1,15})/);
+  r.numero = num ? String(parseInt(num[1].replace(/\./g,''),10)) : '';
+  const serie = up.match(/S[EÉ]RIE\s*[:.]?\s*(\d{1,3})/);
+  r.serie = serie ? serie[1] : '';
+  if (chave && validaChave(chave)){
+    if (!r.numero) r.numero = String(parseInt(chave.substr(25,9),10));
+    if (!r.serie) r.serie = String(parseInt(chave.substr(22,3),10));
+  }
+
+  // Data e hora
+  const dm = t.match(/(\d{2})[\/.-](\d{2})[\/.-](\d{4})(?:\s*[-às]*\s*(\d{2}:\d{2}(?::\d{2})?))?/);
+  r.data = dm ? `${dm[1]}/${dm[2]}/${dm[3]}` : '';
+  r.hora = dm && dm[4] ? dm[4] : ((t.match(/\b\d{2}:\d{2}:\d{2}\b/)||[])[0] || '');
+
+  // Valor total
+  r.total = '';
+  const keys = [/VALOR\s+A\s+PAGAR/i, /VALOR\s+L[ÍI]QUIDO/i, /VALOR\s+(TOTAL\s+)?DOS?\s+SERVI[ÇC]OS?/i, /VALOR\s+TOTAL\s+(DA\s+NOTA|R\$)?/i, /TOTAL\s+R\$/i, /\bTOTAL\b/i];
+  outer: for (const k of keys){
+    for (let i=0;i<lines.length;i++){
+      if (k.test(lines[i]) && !/TRIBUT|DESCONTO|ITENS|QTD/i.test(lines[i])){
+        const m = (lines[i].match(reMoney) || (lines[i+1]||'').match(reMoney));
+        if (m){ r.total = m[m.length-1]; break outer; }
+      }
+    }
+  }
+  if (!r.total){
+    const all = (t.match(reMoney)||[]).sort((a,b) => toNum(b)-toNum(a));
+    r.total = all[0] || '';
+  }
+
+  // Tributos
+  const trib = lines.find(l => /TRIBUTO/i.test(l));
+  const tm = trib && trib.match(reMoney);
+  r.tributos = tm ? tm[0] : '';
+
+  // Pagamento
+  const pags = ['DINHEIRO','CARTÃO DE CRÉDITO','CARTAO DE CREDITO','CARTÃO DE DÉBITO','CARTAO DE DEBITO','CRÉDITO','CREDITO','DÉBITO','DEBITO','PIX','VALE ALIMENTAÇÃO','VALE REFEIÇÃO','BOLETO'];
+  const semAcento = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const found = [...new Set(pags.filter(p => up.includes(p)).map(semAcento))];
+  r.pagto = found.filter(p => !found.some(o => o !== p && o.includes(p))).join(', ');
+
+  return r;
+}
+
+function fmtCNPJ(d){ return d.length===14 ? d.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/,'$1.$2.$3/$4-$5') : d; }
+
+function validaChave(ch){
+  if (!/^\d{44}$/.test(ch)) return false;
+  let soma = 0, peso = 2;
+  for (let i=42;i>=0;i--){ soma += parseInt(ch[i])*peso; peso = peso===9 ? 2 : peso+1; }
+  const resto = soma % 11, dv = resto < 2 ? 0 : 11 - resto;
+  return dv === parseInt(ch[43]);
+}
+
+/* ---------- Tela ---------- */
+function preencher(d){
+  FIELDS.forEach(k => $('f_'+k).value = d[k] || '');
+  mostrarChave();
+}
+$('f_chave').addEventListener('input', mostrarChave);
+
+function mostrarChave(){
+  const ch = $('f_chave').value.replace(/\D/g,'');
+  const box = $('chaveBox'), badge = $('dvBadge');
+  if (!ch){ box.innerHTML=''; badge.innerHTML=''; return; }
+  if (ch.length !== 44){ badge.innerHTML = `<span class="badge b-warn">${ch.length}/44 dígitos</span>`; box.innerHTML=''; return; }
+  const ok = validaChave(ch);
+  badge.innerHTML = ok ? '<span class="badge b-ok">chave válida</span>' : '<span class="badge b-err">dígito verificador não confere</span>';
+  const parts = [
+    ['UF', (UF[ch.substr(0,2)]||'?') + ' ('+ch.substr(0,2)+')'],
+    ['Ano/Mês', ch.substr(4,2)+'/20'+ch.substr(2,2)],
+    ['CNPJ emitente', fmtCNPJ(ch.substr(6,14))],
+    ['Modelo', (MODELO[ch.substr(20,2)]||'?')+' ('+ch.substr(20,2)+')'],
+    ['Série', parseInt(ch.substr(22,3),10)],
+    ['Número', parseInt(ch.substr(25,9),10)],
+    ['Tipo de emissão', ch.substr(34,1)==='1' ? 'Normal' : 'Contingência ('+ch.substr(34,1)+')'],
+    ['Dígito verificador', ch.substr(43,1)]
+  ];
+  box.innerHTML = '<div class="chave-parts">' + parts.map(p => `<div><small>${p[0]}</small>${p[1]}</div>`).join('') + '</div>';
+}
+
+function lerCampos(){ const o={}; FIELDS.forEach(k => o[k] = $('f_'+k).value.trim()); return o; }
+
+/* ---------- Histórico ---------- */
+const KEY = 'notas_fiscais_v1';
+function getHist(){ try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch(e){ return []; } }
+function setHist(h){ try { localStorage.setItem(KEY, JSON.stringify(h)); } catch(e){} renderHist(); }
+function esc(s){ return String(s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function renderHist(){
+  const h = getHist();
+  $('hist').innerHTML = h.length ? h.map((n,i) => `<tr>
+    <td>${esc(n.data)}</td><td>${esc(n.numero)}</td><td>${esc(n.tomador)}${n.dest ? '<br><small>'+esc(n.dest)+'</small>' : ''}</td>
+    <td>${n.total ? 'R$ '+esc(n.total) : ''}</td><td>${esc(n.emitente)}</td><td style="font-size:.75rem;word-break:break-all">${esc(n.chave)}</td>
+    <td><button data-i="${i}">Remover</button></td></tr>`).join('')
+    : '<tr><td colspan="7" style="color:var(--muted)">Nenhuma nota salva ainda.</td></tr>';
+  $('hist').querySelectorAll('button').forEach(b => b.onclick = () => { const x = getHist(); x.splice(+b.dataset.i,1); setHist(x); });
+}
+
+$('btnSalvar').onclick = () => {
+  const d = lerCampos();
+  if (!Object.values(d).some(Boolean)){ setStatus('Não há dados para salvar.', 'err'); return; }
+  setHist([...getHist(), d]);
+  setStatus('Nota salva no histórico.', 'ok');
+};
+$('btnJson').onclick = async () => {
+  try { await navigator.clipboard.writeText(JSON.stringify(lerCampos(), null, 2)); setStatus('JSON copiado.', 'ok'); }
+  catch(e){ setStatus('Não foi possível copiar.', 'err'); }
+};
+$('btnCsv').onclick = () => {
+  const h = getHist(); if (!h.length) return;
+  const head = ['Emitente','CNPJ','Tomador','CPF/CNPJ Tomador','Numero','Serie','Data','Hora','Total','Tributos','Pagamento','Chave'];
+  const rows = h.map(n => [n.emitente,n.cnpj,n.tomador,n.dest,n.numero,n.serie,n.data,n.hora,n.total,n.tributos,n.pagto,"'"+n.chave]
+    .map(v => '"'+String(v||'').replace(/"/g,'""')+'"').join(';'));
+  const blob = new Blob(['\ufeff'+head.join(';')+'\n'+rows.join('\n')], {type:'text/csv;charset=utf-8'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'notas_fiscais.csv'; a.click();
+};
+$('btnApagar').onclick = () => { if (confirm('Apagar todas as notas do histórico?')) setHist([]); };
+$('btnLimpar').onclick = () => {
+  currentFile = null; $('file').value=''; $('preview').style.display='none'; $('btnLer').disabled = true;
+  FIELDS.forEach(k => $('f_'+k).value=''); $('rawText').value=''; $('fonte').innerHTML=''; mostrarChave(); setStatus('');
+};
+
+renderHist();
+</script>
+</body>
+</html>
