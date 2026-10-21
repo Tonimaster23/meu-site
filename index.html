@@ -6,6 +6,7 @@
 <title>Leitor de Nota Fiscal</title>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
 <style>
   :root{
     --bg:#f4f6f8; --card:#fff; --text:#1c2430; --muted:#5d6b7a; --line:#dde3ea;
@@ -71,9 +72,16 @@
     <h2>1. Imagem da nota</h2>
     <div id="drop">
       <strong>Clique ou arraste a imagem aqui</strong>
-      <span>JPG ou PNG · no celular dá para tirar a foto na hora</span>
+      <span>PDF, JPG ou PNG · no celular dá para tirar a foto na hora</span>
     </div>
-    <input type="file" id="file" accept="image/*" hidden>
+    <input type="file" id="file" accept="image/*,application/pdf" hidden>
+    <div id="pdfNav" style="display:none;margin-top:10px">
+      <label>Página do PDF (cada página = uma nota)</label>
+      <div class="btns" style="margin-top:4px">
+        <button id="pgPrev">◀</button><span id="pgInfo" style="align-self:center"></span><button id="pgNext">▶</button>
+        <button id="btnTodas">Ler todas e salvar</button>
+      </div>
+    </div>
     <img id="preview" alt="Pré-visualização da nota">
     <div class="btns">
       <button class="primary" id="btnLer" disabled>Ler nota</button>
@@ -148,8 +156,81 @@ document.addEventListener('paste', e => {
   if (item) loadFile(item.getAsFile());
 });
 
+/* ---------- PDF ---------- */
+let pdfDoc = null, pdfPage = 1;
+if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+
+async function loadPdf(f){
+  try {
+    pdfDoc = await pdfjsLib.getDocument({data: await f.arrayBuffer()}).promise;
+    currentFile = null; pdfPage = 1;
+    $('pdfNav').style.display = pdfDoc.numPages > 1 ? 'block' : 'none';
+    $('btnLer').disabled = false;
+    await showPdfPage();
+    setStatus(`PDF carregado (${pdfDoc.numPages} página(s)). Clique em "Ler nota".`);
+  } catch(e){ console.error(e); setStatus('Não consegui abrir o PDF.', 'err'); }
+}
+async function renderPage(n, scale){
+  const page = await pdfDoc.getPage(n);
+  const vp = page.getViewport({scale});
+  const c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
+  await page.render({canvasContext: c.getContext('2d'), viewport: vp}).promise;
+  return {page, canvas: c};
+}
+async function showPdfPage(){
+  const {canvas} = await renderPage(pdfPage, 1.5);
+  $('preview').src = canvas.toDataURL('image/png'); $('preview').style.display = 'block';
+  $('pgInfo').textContent = `${pdfPage} / ${pdfDoc.numPages}`;
+}
+// texto da página do PDF, agrupado em linhas pela posição vertical
+async function pdfPageText(n){
+  const page = await pdfDoc.getPage(n);
+  const tc = await page.getTextContent();
+  const rows = [];
+  tc.items.forEach(it => {
+    if (!it.str.trim()) return;
+    const y = it.transform[5], x = it.transform[4];
+    let row = rows.find(r => Math.abs(r.y - y) < 3);
+    if (!row){ row = {y, items: []}; rows.push(row); }
+    row.items.push({x, s: it.str});
+  });
+  rows.sort((a,b) => b.y - a.y);
+  return rows.map(r => r.items.sort((a,b) => a.x - b.x).map(i => i.s).join('   ')).join('\n');
+}
+// lê uma página: usa o texto do PDF; se não tiver texto (PDF escaneado), faz OCR
+async function lerPaginaPdf(n){
+  let text = await pdfPageText(n), qr = null;
+  const {canvas} = await renderPage(n, 2.5);
+  const d = canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height);
+  const q = jsQR(d.data, canvas.width, canvas.height); if (q && q.data) qr = q.data;
+  let origem = 'texto do PDF';
+  if (text.replace(/\s/g,'').length < 40){
+    origem = 'OCR';
+    const res = await Tesseract.recognize(canvas, 'por', { logger: m => { if (m.status==='recognizing text') $('prog').value = Math.round(m.progress*100); } });
+    text = res.data.text || '';
+  }
+  return {text, qr, origem};
+}
+$('pgPrev').onclick = () => { if (pdfDoc && pdfPage > 1){ pdfPage--; showPdfPage(); } };
+$('pgNext').onclick = () => { if (pdfDoc && pdfPage < pdfDoc.numPages){ pdfPage++; showPdfPage(); } };
+$('btnTodas').onclick = async () => {
+  if (!pdfDoc) return;
+  $('btnTodas').disabled = true; $('prog').style.display = 'block';
+  const novas = [];
+  for (let n = 1; n <= pdfDoc.numPages; n++){
+    setStatus(`Lendo página ${n} de ${pdfDoc.numPages}...`);
+    const {text, qr} = await lerPaginaPdf(n);
+    novas.push(extrair(text, qr));
+  }
+  setHist([...getHist(), ...novas.map(d => { const o = {}; FIELDS.forEach(k => o[k] = d[k] || ''); return o; })]);
+  $('btnTodas').disabled = false; $('prog').style.display = 'none';
+  setStatus(`${novas.length} nota(s) lidas e salvas no histórico.`, 'ok');
+};
+
 function loadFile(f){
-  if (!f.type.startsWith('image/')) { setStatus('Envie um arquivo de imagem (JPG ou PNG).', 'err'); return; }
+  if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name||'')) { loadPdf(f); return; }
+  if (!f.type.startsWith('image/')) { setStatus('Envie um PDF ou uma imagem (JPG ou PNG).', 'err'); return; }
+  pdfDoc = null; $('pdfNav').style.display = 'none';
   currentFile = f;
   $('preview').src = URL.createObjectURL(f);
   $('preview').style.display = 'block';
@@ -188,6 +269,19 @@ function toCanvas(img, maxSide, enhance){
 
 /* ---------- Leitura ---------- */
 $('btnLer').onclick = async () => {
+  if (pdfDoc){
+    $('btnLer').disabled = true; $('prog').style.display = 'block';
+    try {
+      setStatus('Lendo a página ' + pdfPage + '...');
+      const {text, qr, origem} = await lerPaginaPdf(pdfPage);
+      $('rawText').value = text + (qr ? '\n\n--- QR Code ---\n' + qr : '');
+      preencher(extrair(text, qr));
+      $('fonte').innerHTML = `<span class="badge b-ok">${origem}</span>`;
+      setStatus('Pronto! Confira os dados ao lado.', 'ok');
+    } catch(e){ console.error(e); setStatus('Não consegui ler esta página.', 'err'); }
+    finally { $('btnLer').disabled = false; $('prog').style.display = 'none'; }
+    return;
+  }
   if (!currentFile) return;
   $('btnLer').disabled = true;
   $('prog').style.display = 'block'; $('prog').value = 0;
@@ -275,12 +369,26 @@ function extrair(text, qr){
 
   // Emitente: linha com LTDA/S.A./ME/EIRELI ou a primeira linha "de letras"
   const emp = lines.find(l => /\b(LTDA|S\.?\/?A\.?|EIRELI|\bME\b|\bEPP\b|COMERCIO|COMÉRCIO|SUPERMERCADO|MERCADO|FARMACIA|FARMÁCIA|POSTO|RESTAURANTE)\b/i.test(l) && !/CNPJ/i.test(l));
-  r.emitente = (emp || lines.find(l => /^[A-ZÀ-Ú\s.&-]{6,}$/.test(l) && !/DOCUMENTO|NOTA|CUPOM|DANFE|CONSUMIDOR|PREFEITURA|TOMADOR|PRESTADOR/i.test(l)) || '')
+  // 1º: "Razão social:" dentro do bloco EMITENTE / PRESTADOR
+  let emitBloco = '';
+  const ei = lines.findIndex(l => /EMITENTE|PRESTADOR|FORNECEDOR/i.test(l));
+  if (ei >= 0){
+    for (const l of lines.slice(ei, ei+6)){
+      if (/TOMADOR|DESTINAT/i.test(l)) break;
+      const nm = l.match(/(?:NOME|RAZ[ÃA]O\s+SOCIAL)[^:]*[:\-]\s*(.+)/i);
+      if (nm){ emitBloco = nm[1].replace(/\s*(CPF|CNPJ).*$/i,'').trim(); break; }
+    }
+  }
+  r.emitente = emitBloco || (emp && emp !== r.tomador ? emp : '') || ( lines.find(l => /^[A-ZÀ-Ú\s.&-]{6,}$/.test(l) && !/DOCUMENTO|NOTA|CUPOM|DANFE|CONSUMIDOR|PREFEITURA|TOMADOR|PRESTADOR/i.test(l)) || '')
     .replace(/^.*?(NOME|RAZ[ÃA]O\s+SOCIAL)[^:]*:\s*/i,'').trim();
 
   // Número e série
   const num = up.match(/(?:N[ÚU]MERO\s+DA\s+NFS-?E|N[º°O.]?\s*|NUMERO|NÚMERO|NFC-?E\s*N[º°O]?\.?|NF-?E\s*N[º°O]?\.?)\s*[:.]?\s*(\d{3}\.\d{3}\.\d{3}|\d{1,15})/);
-  r.numero = num ? String(parseInt(num[1].replace(/\./g,''),10)) : '';
+  // rótulo e número podem estar em linhas diferentes ("Nº da nota" ... "1001")
+  const num2 = up.match(/N[º°O]\.?\s*(?:DA\s+)?(?:NOTA|NF-?E|NFS-?E|NFC-?E)(?:\s+FISCAL)?\s*[:.]?\s*(\d{3}\.\d{3}\.\d{3}|\d{1,15})\b/)
+            || up.match(/N[ÚU]MERO(?:\s+DA\s+NOTA)?\s*[:.]?\s*(\d{3}\.\d{3}\.\d{3}|\d{1,15})\b/);
+  const numFinal = num2 || num;
+  r.numero = numFinal ? String(parseInt(numFinal[1].replace(/\./g,''),10)) : '';
   const serie = up.match(/S[EÉ]RIE\s*[:.]?\s*(\d{1,3})/);
   r.serie = serie ? serie[1] : '';
   if (chave && validaChave(chave)){
@@ -398,7 +506,7 @@ $('btnCsv').onclick = () => {
 };
 $('btnApagar').onclick = () => { if (confirm('Apagar todas as notas do histórico?')) setHist([]); };
 $('btnLimpar').onclick = () => {
-  currentFile = null; $('file').value=''; $('preview').style.display='none'; $('btnLer').disabled = true;
+  currentFile = null; pdfDoc = null; $('pdfNav').style.display='none'; $('file').value=''; $('preview').style.display='none'; $('btnLer').disabled = true;
   FIELDS.forEach(k => $('f_'+k).value=''); $('rawText').value=''; $('fonte').innerHTML=''; mostrarChave(); setStatus('');
 };
 
